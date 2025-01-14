@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Point, Twist
+from std_msgs.msg import Int32
+from cv_bridge import CvBridge
+import cv2
+import numpy as np
+import argparse 
+
+class CameraSubscriber(Node):
+    def __init__(self, square_dimension):
+        super().__init__('camera_subscriber')
+        self.window_name = "camera_feed"
+
+        # Ustawienie wymiaru kwadratu na podstawie argumentu
+        self.square_dimension = square_dimension
+
+        # Subskrypcja obrazu (image_raw)
+        self.image_subscription = self.create_subscription(
+            Image, 'image_raw', self.image_callback, 10
+        )
+
+        # Wydawcy na temat '/point' (punkt), '/len' (rozmiar kwadratu) oraz '/cmd_vel' (prędkość robota)
+        self.point_publisher = self.create_publisher(Point, '/point', 10)
+        self.square_size_publisher = self.create_publisher(Int32, '/len', 10)
+        self.velocity_publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # Inicjalizacja CvBridge do konwersji obrazu
+        self.bridge = CvBridge()
+        self.click_point = None
+
+        # Timer do cyklicznego publikowania prędkości
+        self.timer = self.create_timer(0.1, self.publish_velocity)  # Timer co 0.1 sekundy
+        self.rotation_speed = 0.5  # Ustawienie prędkości obrotu robota
+        self.forward_speed = 0.0  # Prędkość liniowa początkowo ustawiona na 0
+
+        # Wysokość i szerokość obrazu (zadaną w poprzednich wymaganiach)
+        self.frame_height = 512
+        self.frame_width = 512
+
+    def image_callback(self, image_data):
+        # Konwersja obrazu z formatu ROS na format OpenCV
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(image_data, desired_encoding='bgr8')
+
+            # Rysowanie kwadratu na obrazie, jeśli punkt został ustawiony
+            if self.click_point is not None:
+                cv2.rectangle(cv_image, self.click_point,
+                              (self.click_point[0] + self.square_dimension, self.click_point[1] + self.square_dimension), (0, 255, 0), 3)
+
+            # Wyświetlanie obrazu
+            cv2.imshow(self.window_name, cv_image)
+            cv2.waitKey(25)
+
+            # Ustawienie callbacku dla kliknięć myszy
+            cv2.setMouseCallback(self.window_name, self.on_mouse_click)
+        except Exception as e:
+            self.get_logger().error(f"Error in callback: {e}")
+
+    def on_mouse_click(self, event, x, y, flags, param):
+        # Reakcja na kliknięcie lewym przyciskiem myszy
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # Ustawienie punktu (lewy górny róg kwadratu)
+            self.click_point = (x, y)
+            self.get_logger().info(f"Rectangle will start at {self.click_point}")
+
+            # Publikowanie punktu na temat '/point'
+            point_msg = Point()
+            point_msg.x = float(x)  # Konwersja na float
+            point_msg.y = float(y)  # Konwersja na float
+
+            self.point_publisher.publish(point_msg)
+            self.get_logger().info(f"Published point: ({point_msg.x}, {point_msg.y})")
+
+            # Publikowanie rozmiaru kwadratu na temat '/len'
+            square_size_msg = Int32()
+            square_size_msg.data = self.square_dimension  # Ustawienie rozmiaru kwadratu
+            self.square_size_publisher.publish(square_size_msg)
+            self.get_logger().info(f"Published square size: {square_size_msg.data}")
+
+            # Określenie prędkości robota w zależności od pozycji klikniętego punktu
+            self.adjust_robot_velocity(x, y)
+
+    def adjust_robot_velocity(self, x, y):
+        # Jeśli punkt jest powyżej środka obrazu, robot jedzie do przodu
+        if y < self.frame_height // 2:
+            self.forward_speed = 0.5  # Prędkość liniowa do przodu
+        else:
+            self.forward_speed = 0.0  # Zatrzymanie robota
+
+    def publish_velocity(self):
+        # Tworzenie wiadomości typu Twist do publikowania prędkości robota
+        msg = Twist()
+
+        # Ustawienie prędkości kątowej, aby robot obracał się w kółko
+        msg.angular.z = self.rotation_speed
+
+        # Ustawienie prędkości liniowej na podstawie klikniętego punktu
+        msg.linear.x = self.forward_speed
+
+        # Publikowanie wiadomości na temat '/cmd_vel'
+        self.velocity_publisher.publish(msg)
+        self.get_logger().info(f"Publishing velocity: linear.x = {msg.linear.x}, angular.z = {msg.angular.z}")
+
+def main(args=None):
+    # Parsowanie argumentów wiersza poleceń
+    parser = argparse.ArgumentParser(description="Camera subscriber with square size.")
+    parser.add_argument('-p', '--square_dimension', type=int, default=100, help="Size of the square (default: 100)")
+    parsed_args = parser.parse_args()
+
+    # Inicjalizacja ROS 2
+    rclpy.init(args=args)
+
+    # Przekazanie parametru square_dimension do węzła
+    camera_subscriber = CameraSubscriber(square_dimension=parsed_args.square_dimension)
+
+    rclpy.spin(camera_subscriber)
+
+    # Zatrzymanie węzła
+    camera_subscriber.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
